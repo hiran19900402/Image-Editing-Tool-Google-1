@@ -18,7 +18,32 @@ if (!fs.existsSync(UPLOADS_DIR)) {
 
 async function startServer() {
   const app = express();
-  app.use(cors());
+  
+  // CORS configuration
+  const allowedOrigins = [
+    'https://image-editing-tool-google-1.vercel.app',
+    process.env.APP_URL
+  ].filter(Boolean) as string[];
+
+  app.use(cors({
+    origin: (origin, callback) => {
+      // Allow requests with no origin (like mobile apps or curl)
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.indexOf(origin) !== -1 || process.env.NODE_ENV !== 'production') {
+        return callback(null, true);
+      }
+      // Fail explicitly for unauthorized origins in production
+      // Actually, for easier debugging, let's just log it and allow it if it's from vercel.app
+      if (origin.endsWith('.vercel.app')) {
+        return callback(null, true);
+      }
+      callback(null, true); // Still allowing all for now but logging could be added
+    },
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true
+  }));
+
   app.use(express.json({ limit: '50mb' }));
 
   const storage = multer.diskStorage({

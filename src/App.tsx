@@ -207,7 +207,8 @@ export default function App() {
     const formData = new FormData();
     formData.append('image', file);
     try {
-      const res = await fetch('/api/metadata', { method: 'POST', body: formData });
+      const baseUrl = import.meta.env.VITE_API_URL || '';
+      const res = await fetch(`${baseUrl}/api/metadata`, { method: 'POST', body: formData });
       const data = await res.json();
       setMetadata(data);
     } catch (err) {
@@ -225,7 +226,8 @@ export default function App() {
     formData.append('quality', quality.toString());
 
     try {
-      const res = await fetch('/api/process', { method: 'POST', body: formData });
+      const baseUrl = import.meta.env.VITE_API_URL || '';
+      const res = await fetch(`${baseUrl}/api/process`, { method: 'POST', body: formData });
       if (res.ok) {
         const blob = await res.blob();
         setProcessedSize(blob.size);
