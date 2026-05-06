@@ -1,4 +1,5 @@
 import express from 'express';
+import 'dotenv/config';
 import { createServer as createViteServer } from 'vite';
 import multer from 'multer';
 import sharp from 'sharp';
@@ -22,22 +23,26 @@ async function startServer() {
   // CORS configuration
   const allowedOrigins = [
     'https://image-editing-tool-google-1.vercel.app',
-    process.env.APP_URL
-  ].filter(Boolean) as string[];
+  ];
+  
+  if (process.env.APP_URL) {
+    allowedOrigins.push(process.env.APP_URL);
+  }
 
   app.use(cors({
     origin: (origin, callback) => {
       // Allow requests with no origin (like mobile apps or curl)
       if (!origin) return callback(null, true);
-      if (allowedOrigins.indexOf(origin) !== -1 || process.env.NODE_ENV !== 'production') {
-        return callback(null, true);
+      
+      const isAllowed = allowedOrigins.includes(origin) || 
+                        (process.env.NODE_ENV !== 'production') ||
+                        origin.endsWith('.vercel.app');
+
+      if (isAllowed) {
+        callback(null, true);
+      } else {
+        callback(new Error('Not allowed by CORS'));
       }
-      // Fail explicitly for unauthorized origins in production
-      // Actually, for easier debugging, let's just log it and allow it if it's from vercel.app
-      if (origin.endsWith('.vercel.app')) {
-        return callback(null, true);
-      }
-      callback(null, true); // Still allowing all for now but logging could be added
     },
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
