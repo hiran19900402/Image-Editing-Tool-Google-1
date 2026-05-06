@@ -9,7 +9,7 @@ import cors from 'cors';
 import { removeBackground } from '@imgly/background-removal-node';
 
 const PORT = 3000;
-const UPLOADS_DIR = path.join(process.cwd(), 'temp_uploads');
+const UPLOADS_DIR = path.join('/tmp', 'temp_uploads');
 
 // Ensure uploads directory exists
 if (!fs.existsSync(UPLOADS_DIR)) {
@@ -100,6 +100,9 @@ async function startServer() {
             if (op.grayscale) {
               pipeline = pipeline.grayscale();
             }
+            if (op.blur !== undefined && op.blur > 0) {
+              pipeline = pipeline.blur(op.blur);
+            }
             break;
           case 'filter':
             // Predefined filter logic
@@ -149,6 +152,14 @@ async function startServer() {
           case 'flop':
             pipeline = pipeline.flop();
             break;
+          case 'crop':
+            pipeline = pipeline.extract({
+              left: Math.round(op.left || 0),
+              top: Math.round(op.top || 0),
+              width: Math.round(op.width || 100),
+              height: Math.round(op.height || 100)
+            });
+            break;
           case 'blur':
             pipeline = pipeline.blur(op.sigma || 5);
             break;
@@ -180,10 +191,13 @@ async function startServer() {
           case 'median':
             pipeline = pipeline.median(op.size || 3);
             break;
-          case 'text':
-            const imgMetadata = await sharp(imageSource).metadata();
-            const w = imgMetadata.width || 800;
-            const h = imgMetadata.height || 600;
+          case 'text': {
+            const textBuffer = await pipeline.toBuffer();
+            const textMeta = await sharp(textBuffer).metadata();
+            const w = textMeta.width || 800;
+            const h = textMeta.height || 600;
+            pipeline = sharp(textBuffer);
+
             const text = op.text || '';
             const color = op.color || '#ffffff';
             const size = op.fontSize || 48;
@@ -219,18 +233,149 @@ async function startServer() {
             `;
             pipeline = pipeline.composite([{ input: Buffer.from(svg), top: 0, left: 0 }]);
             break;
+          }
           case 'rounded':
-            const metadata = await sharp(req.file.path).metadata();
-            const width = metadata.width || 0;
-            const height = metadata.height || 0;
-            const radius = Math.min(width, height) * (op.radius / 100);
+            const roundBuffer = await pipeline.toBuffer();
+            const roundMeta = await sharp(roundBuffer).metadata();
+            const rw = roundMeta.width || 0;
+            const rh = roundMeta.height || 0;
+            pipeline = sharp(roundBuffer);
+
+            const radius = Math.min(rw, rh) * (op.radius / 100);
             const mask = Buffer.from(
-              `<svg><rect x="0" y="0" width="${width}" height="${height}" rx="${radius}" ry="${radius}" /></svg>`
+              `<svg><rect x="0" y="0" width="${rw}" height="${rh}" rx="${radius}" ry="${radius}" /></svg>`
             );
             pipeline = pipeline.composite([{
               input: mask,
               blend: 'dest-in'
             }]);
+            break;
+          case 'draw': {
+            const { data: dBuf, info: dMeta } = await pipeline.png().toBuffer({ resolveWithObject: true });
+            const dw = dMeta.width;
+            const dh = dMeta.height;
+            pipeline = sharp(dBuf);
+
+            let drawSvg = '';
+            const color = op.color || '#000000';
+            const opacity = op.opacity || 1;
+            const strokeWidth = (op.size / dw) * 100;
+
+            if (op.mode === 'brush' || op.mode === 'eraser') {
+              const blendMode = op.mode === 'eraser' ? 'dest-out' : 'over';
+              drawSvg = `
+                <svg width="${dw}" height="${dh}" viewBox="0 0 100 100" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
+                  <path 
+                    d="${op.path}" 
+                    fill="none" 
+                    stroke="${color}" 
+                    stroke-width="${strokeWidth}" 
+                    stroke-linecap="round" 
+                    stroke-linejoin="round" 
+                    opacity="${opacity}"
+                  />
+                </svg>
+              `;
+              pipeline = pipeline.composite([{
+                input: Buffer.from(drawSvg),
+                blend: blendMode
+              }]);
+            } else if (['line', 'rect', 'circle'].includes(op.mode)) {
+              if (op.mode === 'line') {
+                drawSvg = `<line x1="${op.x1}" y1="${op.y1}" x2="${op.x2}" y2="${op.y2}" stroke="${color}" stroke-width="${strokeWidth}" opacity="${opacity}" stroke-linecap="round" />`;
+              } else if (op.mode === 'rect') {
+                const rx = Math.min(op.x1, op.x2);
+                const ry = Math.min(op.y1, op.y2);
+                const rw = Math.abs(op.x2 - op.x1);
+                const rh = Math.abs(op.y2 - op.y1);
+                drawSvg = `<rect x="${rx}" y="${ry}" width="${rw}" height="${rh}" fill="none" stroke="${color}" stroke-width="${strokeWidth}" opacity="${opacity}" />`;
+              } else if (op.mode === 'circle') {
+                const r = Math.sqrt(Math.pow(op.x2 - op.x1, 2) + Math.pow(op.y2 - op.y1, 2));
+                drawSvg = `<circle cx="${op.x1}" cy="${op.y1}" r="${r}" fill="none" stroke="${color}" stroke-width="${strokeWidth}" opacity="${opacity}" />`;
+              }
+
+              const fullSvg = `<svg width="${dw}" height="${dh}" viewBox="0 0 100 100" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">${drawSvg}</svg>`;
+              pipeline = pipeline.composite([{
+                input: Buffer.from(fullSvg)
+              }]);
+            }
+            break;
+          }
+          case 'erase':
+            pipeline = pipeline.ensureAlpha();
+            const { data: eBuf, info: eInfo } = await pipeline.png().toBuffer({ resolveWithObject: true });
+            const ew = eInfo.width;
+            const eh = eInfo.height;
+            pipeline = sharp(eBuf);
+
+            const strokeWidthPercent = (op.size / ew) * 100;
+            const eraseSvg = `
+              <svg width="${ew}" height="${eh}" viewBox="0 0 100 100" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
+                <path 
+                  d="${op.path}" 
+                  fill="none" 
+                  stroke="white" 
+                  stroke-width="${strokeWidthPercent}" 
+                  stroke-linecap="round" 
+                  stroke-linejoin="round" 
+                />
+              </svg>
+            `;
+
+            pipeline = pipeline.composite([{
+              input: Buffer.from(eraseSvg),
+              blend: 'dest-out'
+            }]);
+            break;
+          case 'overlay':
+          case 'watermark':
+            const { data: cBuf, info: cMeta } = await pipeline.png().toBuffer({ resolveWithObject: true });
+            const cw = cMeta.width;
+            const ch = cMeta.height;
+            pipeline = sharp(cBuf);
+
+            let overlayBuffer: Buffer | null = null;
+            let targetW = Math.round((op.width / 100) * cw);
+            let targetH = Math.round((op.height / 100) * ch);
+
+            if (op.text) {
+              // Generate text watermark SVG
+              const fontSize = Math.round(targetH * 0.8);
+              const textSvg = `
+                <svg width="${targetW}" height="${targetH}">
+                  <style>
+                    .text { fill: rgba(255, 255, 255, ${op.opacity || 0.5}); font-family: sans-serif; font-weight: bold; font-size: ${fontSize}px; }
+                  </style>
+                  <text x="50%" y="50%" text-anchor="middle" dominant-baseline="middle" class="text">${op.text}</text>
+                </svg>
+              `;
+              overlayBuffer = Buffer.from(textSvg);
+            } else if (op.image) {
+              const overlayImg = Buffer.from(op.image.split(',')[1], 'base64');
+              let overlayPipeline = sharp(overlayImg).resize(targetW, targetH, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } });
+              
+              if (op.opacity !== undefined && op.opacity < 1) {
+                const mask = Buffer.from(
+                  `<svg width="${targetW}" height="${targetH}"><rect x="0" y="0" width="${targetW}" height="${targetH}" fill="rgba(255,255,255,${op.opacity})" /></svg>`
+                );
+                overlayPipeline = overlayPipeline.composite([{
+                  input: mask,
+                  blend: 'dest-in'
+                }]);
+              }
+              overlayBuffer = await overlayPipeline.toBuffer();
+            }
+
+            if (overlayBuffer) {
+              const left = Math.round((op.x / 100) * cw - (targetW / 2));
+              const top = Math.round((op.y / 100) * ch - (targetH / 2));
+
+              pipeline = pipeline.composite([{
+                input: overlayBuffer,
+                left: Math.max(0, Math.min(cw - targetW, left)),
+                top: Math.max(0, Math.min(ch - targetH, top)),
+              }]);
+            }
             break;
         }
       }
