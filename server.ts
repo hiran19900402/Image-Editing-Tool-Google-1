@@ -1,12 +1,9 @@
 import express from 'express';
-import { createServer as createViteServer } from 'vite';
 import multer from 'multer';
-import sharp from 'sharp';
 import path from 'path';
 import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 import cors from 'cors';
-import { removeBackground } from '@imgly/background-removal-node';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -20,11 +17,18 @@ if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 }
 
+console.log('Starting server initialization...');
+
 async function startServer() {
   try {
     const app = express();
     app.use(cors());
-    app.use(express.json({ limit: '50mb' }));
+    app.use(express.json({ limit: '100mb' }));
+
+    // Pre-load sharp to ensure it's working
+    console.log('Loading sharp...');
+    const sharp = (await import('sharp')).default;
+    console.log('Sharp loaded.');
 
     const storage = multer.diskStorage({
       destination: UPLOADS_DIR,
@@ -78,10 +82,18 @@ async function startServer() {
         // Handle background removal first if requested, as it returns a new image
         const removeBgOp = operations.find((op: any) => op.type === 'remove-bg');
         if (removeBgOp) {
-          const bgRemovedBlob = await removeBackground(imageSource);
-          imageSource = Buffer.from(await bgRemovedBlob.arrayBuffer());
+          try {
+            console.log('Loading background removal module...');
+            const { removeBackground } = await import('@imgly/background-removal-node');
+            const bgRemovedBlob = await removeBackground(imageSource);
+            imageSource = Buffer.from(await bgRemovedBlob.arrayBuffer());
+          } catch (bgError) {
+            console.error('Background removal failed:', bgError);
+            throw new Error('Background removal failed. It may be due to memory limits or network reachability of model files.');
+          }
         }
 
+        const sharp = (await import('sharp')).default;
         let pipeline = sharp(imageSource);
 
         for (const op of operations) {
@@ -406,15 +418,18 @@ async function startServer() {
     
     // Vite Integration
     if (process.env.NODE_ENV !== 'production') {
+      console.log('Running in development mode, loading Vite...');
+      const { createServer: createViteServer } = await import('vite');
       const vite = await createViteServer({
         server: { middlewareMode: true },
         appType: 'spa',
       });
       app.use(vite.middlewares);
     } else {
+      console.log('Running in production mode, serving static files from dist');
       const distPath = path.join(process.cwd(), 'dist');
       if (!fs.existsSync(distPath)) {
-        console.warn('Production build "dist" folder not found!');
+        console.error('CRITICAL: dist directory not found at', distPath);
       }
       app.use(express.static(distPath));
       app.get('*', (req, res) => {
